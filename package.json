@@ -1,0 +1,25 @@
+{
+  "name": "telegram-video-forwarder",
+  "version": "1.0.0",
+  "description": "Forward videos from Telegram channels with forwarding restrictions",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": ["telegram", "video", "forwarder", "bot"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "telegram": "^2.22.0",
+    "input": "^1.0.1",
+    "dotenv": "^16.4.5",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2"
+  }
+}
