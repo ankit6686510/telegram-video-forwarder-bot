@@ -54,7 +54,7 @@ async function handleCommand(event: NewMessageEvent): Promise<void> {
 
 async function handleStart(message: Api.Message): Promise<void> {
     const helpText = `
-🤖 **Telegram Media Forwarder Bot**
+ **Telegram Media Forwarder Bot**
 
 This bot automatically forwards media from channels with forwarding restrictions or from a configured source channel.
 

@@ -27,14 +27,12 @@ export async function uploadMedia(
         }
 
         // Send the message with media directly
-        // gramJS sendMessage/sendFile handles file paths automatically
         const result = await client.sendMessage(targetChatId, {
             file: mediaPath,
             message: caption || (originalMessage?.message || ''),
+            formattingEntities: originalMessage?.entities,
             attributes: attributes,
             forceDocument: forceDocument as any,
-            // Add progress callback if possible with sendMessage, though might not be exposed directly in same way
-            // or we rely on logger
         });
 
         logger.info(`Media sent successfully! Message ID: ${result.id}`);

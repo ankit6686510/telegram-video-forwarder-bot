@@ -41,23 +41,6 @@ async function forwardHistory() {
 
         let totalProcessed = 0;
 
-        // --- PARALLEL PREFETCHING STATE ---
-        // Map of MessageID -> Download Promise
-        const prefetchMap = new Map<number, Promise<string | null>>();
-        const WINDOW_SIZE = config.concurrentDownloads || 5; // Number of items to look ahead
-
-        // Helper
-        const ensureDownload = (msg: Api.Message) => {
-            if (!prefetchMap.has(msg.id)) {
-                logger.info(`[Pipeline] Starting background download for ${msg.id}...`);
-                const promise = downloadMedia(msg).then(path => {
-                    // logger.info(`[Pipeline] Finished message ${msg.id}`);
-                    return path;
-                });
-                prefetchMap.set(msg.id, promise);
-            }
-        };
-
         while (true) {
             const messages = await client.getMessages(sourceChatId, {
                 limit: 20,
@@ -70,89 +53,71 @@ async function forwardHistory() {
                 break;
             }
 
-            // Filter for media messages
-            const mediaMessages = messages.filter(msg =>
-                msg.media &&
-                !msg.action &&
-                ('photo' in msg.media || 'document' in msg.media)
-            );
+            // Filter for content messages (exclude service actions)
+            const contentMessages = messages.filter(msg => !msg.action);
 
-            // If batch has no media, just advance offset
-            if (mediaMessages.length === 0) {
+            // If batch has no content, just advance offset
+            if (contentMessages.length === 0) {
                 const batchLast = messages[messages.length - 1];
                 lastId = batchLast.id;
                 saveOffset(lastId);
                 continue;
             }
 
-            for (let i = 0; i < mediaMessages.length; i++) {
-                const message = mediaMessages[i];
-
-                // --- 1. FILL THE WINDOW ---
-                // Look ahead and trigger downloads
-                for (let j = 0; j <= WINDOW_SIZE; j++) {
-                    const targetIndex = i + j;
-                    if (targetIndex < mediaMessages.length) {
-                        ensureDownload(mediaMessages[targetIndex]);
-                    }
-                }
-
-                // --- 2. PROCESSING CURRENT ---
+            for (let i = 0; i < contentMessages.length; i++) {
+                const message = contentMessages[i];
                 logger.info(`Processing message ${message.id}...`);
 
-                // Attempt Zero-Copy Forwarding
                 let success = false;
+
+                // --- OPTION 1: Server-Side Forward (Fastest, no download) ---
                 try {
-                    await client.sendMessage(targetChatId, {
-                        message: message.message || '',
-                        file: message.media,
+                    await client.forwardMessages(targetChatId, {
+                        messages: [message.id],
+                        fromPeer: sourceChatId,
+                        dropAuthor: true,
                     });
-                    logger.info(`Successfully forwarded message ${message.id} (via zero-copy)`);
+                    logger.info(`Successfully forwarded message ${message.id} (via server-side forward)`);
                     success = true;
-                    totalProcessed++;
-
-                    // Optimization: If Zero-Copy worked, cancel/discard download
-                    // (We can't easily cancel the promise, but we can ignore the result and delete file)
-                    if (prefetchMap.has(message.id)) {
-                        const path = await prefetchMap.get(message.id);
-                        if (path) {
-                            deleteMedia(path);
-                            logger.info(`[Pipeline] Discarded unused download for ${message.id}`);
-                        }
-                        prefetchMap.delete(message.id);
-                    }
-
                 } catch (err: any) {
-                    // Check if restricted
                     const msg = err.errorMessage || err.message || '';
-                    if (!msg.includes('CHAT_FORWARDS_RESTRICTED') && !msg.includes('protected')) {
+                    if (msg.includes('CHAT_FORWARDS_RESTRICTED') || msg.includes('protected')) {
+                        logger.info(`Message ${message.id} is restricted. Attempting copy...`);
+                    } else {
                         logger.error(`Error forwarding ${message.id}: ${msg}`);
                     }
                 }
 
-                // Fallback to Upload
+                // --- OPTION 2: Server-Side Copy (Zero-copy, no download) ---
                 if (!success) {
-                    // Wait for the download to complete
-                    let currentMediaPath: string | null = null;
-
-                    if (prefetchMap.has(message.id)) {
-                        // It should be downloading or done
-                        currentMediaPath = await prefetchMap.get(message.id) || null;
-                    } else {
-                        // Fallback catch-all
-                        logger.info(`Downloading message ${message.id} (synchronous fallback)...`);
-                        currentMediaPath = await downloadMedia(message);
+                    try {
+                        await client.sendMessage(targetChatId, {
+                            message: message.message || '',
+                            formattingEntities: message.entities,
+                            file: message.media,
+                        });
+                        logger.info(`Successfully copied message ${message.id} (via zero-copy)`);
+                        success = true;
+                    } catch (err: any) {
+                        const msg = err.errorMessage || err.message || '';
+                        if (message.media && (msg.includes('CHAT_FORWARDS_RESTRICTED') || msg.includes('protected'))) {
+                            logger.info(`Zero-copy failed for ${message.id}. Falling back to download...`);
+                        } else {
+                            logger.error(`Error copying ${message.id}: ${msg}`);
+                        }
                     }
+                }
 
-                    // Remove from map to free memory
-                    prefetchMap.delete(message.id);
+                // --- OPTION 3: Local Download/Upload (Last resort) ---
+                if (!success && message.media) {
+                    logger.info(`Downloading message ${message.id} because of channel restrictions...`);
+                    const currentMediaPath = await downloadMedia(message);
 
                     if (currentMediaPath) {
                         try {
-                            await uploadMedia(targetChatId, currentMediaPath, undefined, message);
+                            await uploadMedia(targetChatId, currentMediaPath, message.message || '', message);
                             logger.info(`Successfully forwarded message ${message.id} (via download/upload)`);
                             success = true;
-                            totalProcessed++;
                             deleteMedia(currentMediaPath);
                         } catch (upErr) {
                             logger.error(`Upload failed for ${message.id}`, upErr);
@@ -161,6 +126,12 @@ async function forwardHistory() {
                     } else {
                         logger.error(`Failed to download media for ${message.id}`);
                     }
+                } else if (!success && !message.media) {
+                    logger.error(`Failed to process text message ${message.id}`);
+                }
+
+                if (success) {
+                    totalProcessed++;
                 }
 
                 // Update Offset

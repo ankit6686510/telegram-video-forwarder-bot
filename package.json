@@ -6,9 +6,15 @@
   "scripts": {
     "build": "tsc",
     "start": "ts-node src/index.ts",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "history": "ts-node src/forward-history.ts"
   },
-  "keywords": ["telegram", "video", "forwarder", "bot"],
+  "keywords": [
+    "telegram",
+    "video",
+    "forwarder",
+    "bot"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {

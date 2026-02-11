@@ -24,11 +24,6 @@ async function handleNewMessage(event: NewMessageEvent): Promise<void> {
     try {
         const message = event.message;
 
-        // Skip if no media
-        if (!message.media) {
-            return;
-        }
-
         // Source chat filtering
         if (config.sourceChatId) {
             const chatId = message.chatId?.toString();
@@ -36,58 +31,82 @@ async function handleNewMessage(event: NewMessageEvent): Promise<void> {
             const sourceId = config.sourceChatId.toString();
             const normalizeId = (id: string) => id.replace(/^-100/, '').replace(/^-/, '');
 
-            if (chatId && normalizeId(chatId) !== normalizeId(sourceId)) {
+            const isMatch = (chatId && normalizeId(chatId) === normalizeId(sourceId)) ||
+                (message.chat && 'username' in message.chat && message.chat.username === sourceId.replace('@', ''));
+
+            if (!isMatch) {
                 return;
             }
-        }
-
-        // Check if it's a media message we should process
-        const isMedia = isMediaMessage(message);
-        if (!isMedia) {
+        } else {
+            // If no source chat is configured, only forward if it looks like a manual request or similar
+            // For this project, we usually expect a source chat.
             return;
         }
 
-        logger.info(`Detected media in chat ${message.chatId}`);
-
-        // Check configuration for forwarding logic
-        // If sourceChatId is set, we forward everything from there regardless of restriction
-        // If NOT set, we only forward restricted content as per original logic
-        const shouldForward = config.sourceChatId
-            ? true // Forward everything from source chat
-            : (message.fwdFrom || !canForwardMessage(message)); // Only restricted
-
-        if (!shouldForward && !config.sourceChatId) {
-            logger.info('Message can be forwarded normally, skipping download/upload');
-            return;
-        }
-
-        logger.info(`Processing message ${message.id} from ${message.chatId}...`);
-
-        // Download the media
-        const mediaPath = await downloadMedia(message);
-        if (!mediaPath) {
-            logger.error('Failed to download media');
-            return;
-        }
+        logger.info(`Processing live message ${message.id} from ${message.chatId}...`);
 
         // Determine target chat
         const targetChat = config.targetChatId;
         if (!targetChat) {
-            logger.warn('No target chat configured. Use /setchat command or set TARGET_CHAT_ID in .env');
-            deleteMedia(mediaPath);
+            logger.warn('No target chat configured.');
             return;
         }
 
-        // Upload to target chat
-        const result = await uploadMedia(targetChat, mediaPath, undefined, message);
+        const client = getClient();
+        let success = false;
 
-        // Clean up
-        deleteMedia(mediaPath);
+        // --- OPTION 1: Server-Side Forward ---
+        try {
+            await client.forwardMessages(targetChat, {
+                messages: [message.id],
+                fromPeer: message.chatId!,
+                dropAuthor: true,
+            });
+            logger.info(`Successfully live-forwarded message ${message.id} (via server-side forward)`);
+            success = true;
+        } catch (err: any) {
+            const msg = err.errorMessage || err.message || '';
+            if (msg.includes('CHAT_FORWARDS_RESTRICTED') || msg.includes('protected')) {
+                logger.info(`Live message ${message.id} is restricted. Attempting copy...`);
+            } else {
+                logger.error(`Error live-forwarding ${message.id}: ${msg}`);
+            }
+        }
 
-        if (result) {
-            logger.info('Media forwarded successfully!');
-        } else {
-            logger.error('Failed to forward media');
+        // --- OPTION 2: Server-Side Copy ---
+        if (!success) {
+            try {
+                await client.sendMessage(targetChat, {
+                    message: message.message || '',
+                    formattingEntities: message.entities,
+                    file: message.media,
+                });
+                logger.info(`Successfully live-copied message ${message.id} (via zero-copy)`);
+                success = true;
+            } catch (err: any) {
+                const msg = err.errorMessage || err.message || '';
+                if (message.media && (msg.includes('CHAT_FORWARDS_RESTRICTED') || msg.includes('protected'))) {
+                    logger.info(`Live zero-copy failed for ${message.id}. Falling back to download...`);
+                } else {
+                    logger.error(`Error live-copying ${message.id}: ${msg}`);
+                }
+            }
+        }
+
+        // --- OPTION 3: Local Download/Upload ---
+        if (!success && message.media && ('photo' in message.media || 'document' in message.media)) {
+            logger.info(`Downloading live message ${message.id} because of channel restrictions...`);
+            const mediaPath = await downloadMedia(message);
+            if (mediaPath) {
+                try {
+                    await uploadMedia(targetChat, mediaPath, message.message || '', message);
+                    logger.info(`Successfully live-forwarded message ${message.id} (via download/upload)`);
+                    deleteMedia(mediaPath);
+                } catch (upErr) {
+                    logger.error(`Live upload failed for ${message.id}`, upErr);
+                    deleteMedia(mediaPath);
+                }
+            }
         }
     } catch (error) {
         logger.error('Error handling message:', error);
